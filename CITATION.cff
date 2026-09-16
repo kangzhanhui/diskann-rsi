@@ -1,0 +1,8 @@
+cff-version: 1.2.0
+title: "DiskANN-RSI: Query-Path Optimizations for a Rust-Native Vamana Index, and a Same-Machine Reproducibility Study"
+type: software
+authors:
+  - name: "[your name]"
+message: "If you use this software or its measurements, please cite it as below."
+date-released: 2026-09-16
+license: MIT

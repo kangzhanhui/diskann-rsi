@@ -1,0 +1,59 @@
+{
+  "search_directories": [
+    "generated_data"
+  ],
+  "jobs": [
+    {
+      "type": "graph-index-build",
+      "content": {
+        "source": {
+          "index-source": "Build",
+          "data_type": "float32",
+          "data": "sift1m/sift_base_1m_128d.fbin",
+          "distance": "squared_l2",
+          "max_degree": 32,
+          "l_build": 100,
+          "alpha": 1.2,
+          "backedge_ratio": 1.0,
+          "num_threads": 2,
+          "start_point_strategy": {
+            "latin_hyper_cube": [
+              7,
+              202232322
+            ]
+          }
+        },
+        "search_phase": {
+          "search-type": "topk",
+          "queries": "sift1m/sift_query_10k_128d.fbin",
+          "groundtruth": "sift1m/gt_sift_10k_k100.bin",
+          "reps": 3,
+          "num_threads": [
+            1,
+            2
+          ],
+          "recall_target": 0.95,
+          "runs": [
+            {
+              "search_n": 10,
+              "search_l": [
+                25,
+                35,
+                45,
+                60,
+                80,
+                100,
+                150,
+                200,
+                300
+              ],
+              "recall_k": 10,
+              "early_stop_ratio": 1.2,
+              "early_stop_min_hops": 8
+            }
+          ]
+        }
+      }
+    }
+  ]
+}
