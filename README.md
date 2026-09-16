@@ -62,9 +62,9 @@ Raw measurements from the paper are in [`bench/results/`](bench/results/) (`vama
 @misc{diskann-rsi-2026,
   title  = {DiskANN-RSI: Query-Path Optimizations for a Rust-Native Vamana Index,
             and a Same-Machine Reproducibility Study},
-  author = {[your name]},
+  author = {Kang, Zhanhui},
   year   = {2026},
-  howpublished = {\url{https://github.com/[your-org]/diskann-rsi}}
+  howpublished = {\url{https://github.com/kangzhanhui/diskann-rsi}}
 }
 ```
 
