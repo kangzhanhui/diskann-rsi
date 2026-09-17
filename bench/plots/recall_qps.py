@@ -19,6 +19,8 @@ import matplotlib.pyplot as plt
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 RESULTS = os.path.join(ROOT, "bench", "results")
 OUT = os.path.join(ROOT, "paper", "fig_recall_qps.pdf")
+# PNG twin is for the README: GitHub's Markdown renderer does not display PDF images.
+OUT_PNG = os.path.join(ROOT, "paper", "fig_recall_qps.png")
 
 # (system, alpha) -> display label / style.  Only the 1-thread reference protocol
 # is shown, except NSG which was measured with 2 threads (marked as such).
@@ -86,6 +88,8 @@ def main():
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     fig.savefig(OUT)
     print("wrote", OUT)
+    fig.savefig(OUT_PNG, dpi=200)
+    print("wrote", OUT_PNG)
     for key, label, *_ in SERIES:
         data = points.get(key)
         if data:
