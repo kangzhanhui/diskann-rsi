@@ -64,7 +64,7 @@ Raw measurements from the paper are in [`bench/results/`](bench/results/) (`vama
             and a Same-Machine Reproducibility Study},
   author = {Kang, Zhanhui},
   year   = {2026},
-  howpublished = {\url{https://github.com/kangzhanhui/diskann-rsi}}
+  howpublished = {\url{https://github.com/tersemind/diskann-rsi}}
 }
 ```
 
