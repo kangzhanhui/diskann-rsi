@@ -1,6 +1,7 @@
 % arXiv-ready draft. Compile: pdflatex main && bibtex none (thebibliography inline) && pdflatex main
 \documentclass[11pt]{article}
 \usepackage[margin=1in]{geometry}
+\usepackage{graphicx}
 \usepackage{booktabs}
 \usepackage{multirow}
 \usepackage{url}
@@ -203,12 +204,27 @@ hours (efanna, K=200).}
 \end{table}
 
 \subsection{Recall--QPS ladders}
+Figure~\ref{fig:recallqps} shows the recall--QPS curves reconstructed from the
+frozen raw measurements (each point is the median over repeats), and
 Table~\ref{tab:ladder} gives the full operating ladders (1T; NSG 2T).
 DiskANN-RSI trails stock Vamana by 31\% at Ls=16 and 19\% at Ls=32, reaches
 $-11\%$ at Ls=64, and is within noise at Ls$\ge$128; recalls match to
 $\pm$0.001 at every rung, indicating identical graph quality --- the delta is
 pure search-kernel speed. hnswlib leads the $\ge$0.95 band on this host;
 NSG trails throughout despite a 2-thread advantage.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{fig_recall_qps.pdf}
+\caption{Recall@10 versus QPS on SIFT1M, measured in one session on one
+machine: hnswlib (master-default), stock Vamana, DiskANN-RSI and NSG (NSG at
+two threads, all others at one). Each marker is the median over repeats at one
+operating point of the raw rows in \texttt{bench/results/}; curves are
+reconstructed by \texttt{bench/plots/recall\_qps.py}. The $\alpha{=}1.0$
+DiskANN-RSI curve sits below stock Vamana at low search depths and converges to
+it at high recall, while $\alpha{=}1.2$ closes most of that gap.}
+\label{fig:recallqps}
+\end{figure}
 
 \begin{table}[t]
 \centering
