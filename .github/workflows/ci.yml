@@ -533,7 +533,7 @@ jobs:
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
           files: lcov.info
-          fail_ci_if_error: true
+          fail_ci_if_error: false  # fork has no CODECOV_TOKEN; coverage upload must not block CI
           flags: unittests
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
@@ -542,7 +542,7 @@ jobs:
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
           files: lcov_miri.info
-          fail_ci_if_error: true
+          fail_ci_if_error: false  # fork has no CODECOV_TOKEN; coverage upload must not block CI
           flags: miri
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
