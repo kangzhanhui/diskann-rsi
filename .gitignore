@@ -341,3 +341,9 @@ target/
 generated_data/sift1m/
 # Synthetic 1M verification data (regenerate locally)
 generated_data/synth1m/
+
+# --- Local paper/arXiv build bundles (not part of the artifact) ---
+arxiv_submit/
+paper.tar
+paper/*.aux
+paper/*.out

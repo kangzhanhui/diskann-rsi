@@ -1,7 +1,7 @@
 # Benchmarks
 
 All numbers below come from a single measurement session on **2026-09-16** on one
-Tencent Cloud CVM: **2 vCPU / 3.6 GB RAM + 8 GB swap, OpenCloudOS 9.4**.
+Cloud VM: **2 vCPU / 3.6 GB RAM + 8 GB swap, OpenCloudOS 9.4**.
 Dataset: **SIFT1M** (1M × 128, L2). Metric: **recall@10 vs QPS**, 10k queries,
 3 repetitions, medians reported. Single-thread (1T) is the reference protocol;
 NSG's search binary uses OpenMP with 2 threads and is labelled 2T.

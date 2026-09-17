@@ -6,7 +6,7 @@ records already ship in [`bench/results/`](../bench/results/).
 
 ## Host
 
-- Tencent Cloud CVM: **2 vCPU (x86_64), 3.6 GB RAM + 8 GB swapfile**, OpenCloudOS 9.4 (RHEL family, `dnf`)
+- Cloud VM: **2 vCPU (x86_64), 3.6 GB RAM + 8 GB swapfile**, OpenCloudOS 9.4 (RHEL family, `dnf`)
 - Single socket, shared cores; keep the host idle during measurement (timing-sensitive)
 - Dataset: **SIFT1M** (1M × 128, L2) converted to `.fbin` + ground truth via `tools/prepare_sift1m.py`
 

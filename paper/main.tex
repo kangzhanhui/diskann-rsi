@@ -7,12 +7,18 @@
 \usepackage{hyperref}
 \usepackage{microtype}
 
+\hypersetup{
+  pdftitle={DiskANN-RSI: Query-Path Optimizations for a Rust-Native Vamana Index, and a Same-Machine Reproducibility Study},
+  pdfauthor={Zhanhui Kang}
+}
+
 \title{DiskANN-RSI: Query-Path Optimizations for a Rust-Native Vamana Index,\\and a Same-Machine Reproducibility Study}
 
 \author{
   Zhanhui Kang\\
-  Independent Researcher\\
-  \texttt{kangzhanh@gmail.com} \quad \url{https://github.com/kangzhanhui}
+  TerseMind\\
+  \texttt{research@tersemind.ai} \quad \url{https://github.com/kangzhanhui}\\
+  ORCID: \url{https://orcid.org/0009-0008-7791-1917}
 }
 
 \date{September 2026}
@@ -164,7 +170,7 @@ $\sim$6 minutes.
 \label{sec:eval}
 \subsection{Setup}
 All cross-system numbers come from a single session (2026-09-16) on one
-Tencent Cloud CVM instance: 2 vCPU, 3.6\,GB RAM + 8\,GB swap, OpenCloudOS 9.4.
+cloud VM instance: 2 vCPU, 3.6\,GB RAM + 8\,GB swap, OpenCloudOS 9.4.
 Dataset SIFT1M (1M $\times$ 128, L2); recall@10; 10k queries; 3 repetitions;
 QPS is the throughput recorded in the frozen raw rows. Single-thread (1T) is
 the reference protocol; NSG's search
@@ -299,7 +305,8 @@ are claimed as such. We release the code, the raw measurements, and the
 runbook to make that gate cheap to apply.
 
 \section*{Reproducibility}
-Code, \texttt{job.json} configurations, raw JSONL measurements
+The artifact is available at \url{https://github.com/tersemind/diskann-rsi}
+under the MIT License. Code, \texttt{job.json} configurations, raw JSONL measurements
 (\texttt{bench/results/}), and the environment runbook are included in the
 repository. The full optimization diff relative to the upstream port is in
 \texttt{docs/final\_patch.diff}.

@@ -8,7 +8,7 @@ This repository accompanies the paper draft in [`paper/main.tex`](paper/main.tex
 
 ## Headline results (SIFT1M, recall@10, single thread)
 
-Measured on one Tencent Cloud CVM (2 vCPU / 3.6 GB RAM + 8 GB swap, OpenCloudOS 9.4), 2026-09-16, 10k queries × 3 reps:
+Measured on one cloud VM (2 vCPU / 3.6 GB RAM + 8 GB swap, OpenCloudOS 9.4), 2026-09-16, 10k queries × 3 reps:
 
 | System | QPS @ recall≥0.95 | recall@10 | Build time | Peak mem |
 |---|---|---|---|---|
