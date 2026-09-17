@@ -21,6 +21,10 @@ Measured on one cloud VM (2 vCPU / 3.6 GB RAM + 8 GB swap, OpenCloudOS 9.4), 202
 - Inside the optimizer's own harness the same changes showed **+55% QPS@recall≥0.95** (2994.6 → 4641.1); under the unified protocol they do not transfer uniformly (see paper §5.4 for why).
 - Full recall–QPS ladders, per-optimization measurements, and negative results: [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
 
+![Recall@10 versus QPS on SIFT1M, one machine, one protocol](paper/fig_recall_qps.pdf)
+
+*Recall@10 vs QPS, reconstructed from the frozen raw rows in [`bench/results/`](bench/results/) by [`bench/plots/recall_qps.py`](bench/plots/recall_qps.py); each marker is the median over repeats. NSG is measured at two threads, all other systems at one.*
+
 ## What the RSI loop changed
 
 1. **Epoch-stamped visited set with 16-bit stamps** — dense per-query stamps, O(1) clear; 4 MB → 2 MB footprint at 1M points; visited-set time −45%, beam-expansion −19% (instrumented).
