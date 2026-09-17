@@ -117,7 +117,8 @@ reported per thread count --- the industry-standard QPS-at-recall operating
 point used throughout this paper. Data preparation for SIFT1M is scripted
 (\texttt{tools/prepare\_sift1m.py}); all measurements in
 Section~\ref{sec:eval} use recall@10 over 10{,}000 queries with 3
-repetitions, and we report medians.
+repetitions per operating point, and we report the throughput recorded in the
+frozen raw rows (per-repetition values are preserved in the logs).
 
 \section{Query-Path Optimizations}
 \label{sec:opts}
@@ -164,8 +165,9 @@ $\sim$6 minutes.
 \subsection{Setup}
 All cross-system numbers come from a single session (2026-09-16) on one
 Tencent Cloud CVM instance: 2 vCPU, 3.6\,GB RAM + 8\,GB swap, OpenCloudOS 9.4.
-Dataset SIFT1M (1M $\times$ 128, L2); recall@10; 10k queries; 3 repetitions,
-median reported. Single-thread (1T) is the reference protocol; NSG's search
+Dataset SIFT1M (1M $\times$ 128, L2); recall@10; 10k queries; 3 repetitions;
+QPS is the throughput recorded in the frozen raw rows. Single-thread (1T) is
+the reference protocol; NSG's search
 binary parallelizes queries over OpenMP with 2 threads and is labelled 2T.
 Raw records ship in \texttt{bench/results/*.jsonl}.
 
@@ -227,7 +229,8 @@ nsg (2T) & Ls16 .877/2929 & Ls32 .952/2632 & Ls64 .986/2099 & Ls128 .996/1547 \\
  & Ls256 .999/1030 & & & \\
 \bottomrule
 \end{tabular}
-\caption{Recall@10/QPS ladders on SIFT1M (1T; NSG 2T, medians of 3 reps).}
+\caption{Recall@10/QPS ladders on SIFT1M (1T; NSG 2T; QPS as recorded in the
+frozen raw rows, 3 repetitions per operating point).}
 \label{tab:ladder}
 \end{table}
 
@@ -245,8 +248,9 @@ at low search depths and parity at high recall. Three factors explain the
 gap. (i) \emph{Different protocols}: the RSI harness used its own data
 layout, baseline pairing, and early-stop configuration; its baseline
 (pre-optimization source) is not bit-comparable to the stock C++ Vamana
-baseline used here. (ii) \emph{Hardware regime}: on this 2-vCPU host the 1M
-working set is largely L3-resident, so the cache-residency win of 16-bit
+baseline used here. (ii) \emph{Hardware regime}: on this 2-vCPU host the
+1M-vector set (512\,MB) and the graph stream from DRAM, while the 2--4\,MB
+visited set is cache-resident under either stamp width, so halving the 16-bit
 stamps has little room to act, while the diversity-phase code added to the
 kernel imposes constant per-expansion overhead that dominates at small L.
 (iii) \emph{LTO asymmetry}: the RSI binary carries fat LTO (+10--12\%), i.e.,
@@ -260,8 +264,8 @@ scaling.
 The RSI loop also produced measured rejections, which we record to save
 others the compute: \textbf{SQ8+rerank} tracks full precision within
 $\sim$0.001 recall but yields no QPS gain here (5238 vs.\ 4641 at the metric
-point) --- quantization pays when memory bandwidth is the bottleneck, which
-an L3-resident working set is not; \textbf{candidate-queue merge insertion}
+point) --- quantization pays when vector-fetch bandwidth is the bottleneck,
+which it is not on this compute-bound host; \textbf{candidate-queue merge insertion}
 was slower and reverted; \textbf{random-projection data reordering} had no
 measurable effect at 1M on this host; \textbf{partial-distance early exit}
 aborts 86.9\% of distance computations but after $\sim$2.9 of 4 chunks, a
