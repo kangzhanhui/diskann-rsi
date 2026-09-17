@@ -76,8 +76,8 @@ mod imp {
             benchmarks::{run_build, QueryType, Strategy},
             build::{self, load_index, only_single_insert, save_index, BuildStats},
             result::{
-                AggregatedSearchResults, BuildResult, DEFAULT_RECALL_TARGET, QuantBuildResult,
-                TopkSweepSummary,
+                AggregatedSearchResults, BuildResult, QuantBuildResult, TopkSweepSummary,
+                DEFAULT_RECALL_TARGET,
             },
             search::plugins,
         },
