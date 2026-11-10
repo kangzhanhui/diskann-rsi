@@ -1,5 +1,6 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT license.
+# RSI CI compatibility changes: Copyright (C) 2026 TerseMind.
 
 on:
   push:
@@ -314,7 +315,9 @@ jobs:
   baseline:
     needs: basics
     name: sde-baseline-tests
-    runs-on: ubuntu-latest
+    # Ubuntu 26.04's system loader executes AVX instructions before our tests run.
+    # Keep Nehalem emulation on a compatible userspace; do not weaken the CPU check.
+    runs-on: ubuntu-24.04
     env:
       # Compile for the x86-64 baseline — no AVX, no AVX2.
       RUSTFLAGS: "-Dwarnings -Ctarget-cpu=x86-64"
@@ -348,8 +351,11 @@ jobs:
           tar xf intel-sde.tar.xz --strip-components=1 -C intel-sde
           rm intel-sde.tar.xz
 
-      - name: Verify SDE installation
-        run: ./intel-sde/sde64 --version
+      - name: Verify SDE installation and baseline userspace
+        run: |
+          ./intel-sde/sde64 --version
+          # Fail before compilation if the host loader cannot run on Nehalem.
+          ./intel-sde/sde64 -nhm -- /bin/true
 
       - name: "SDE Baseline Tests (Nehalem)"
         run: |
