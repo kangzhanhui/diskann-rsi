@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1320" height="720" viewBox="0 0 1320 720" role="img" aria-labelledby="title desc">
+  <title id="title">DiskANN-RSI: from optimization to reproduction</title>
+  <desc id="desc">The research loop proposes, implements, measures, retains or reverts, and iterates. The retained candidate is frozen and compared with stock Vamana, hnswlib and NSG under a shared protocol to check which gains transfer.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#94a3b8"/></marker>
+    <marker id="blueArrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#2563eb"/></marker>
+  </defs>
+  <rect x="1" y="1" width="1318" height="718" rx="22" fill="#fff" stroke="#dbe4ef" stroke-width="2"/>
+  <g font-family="Arial, Helvetica, sans-serif">
+    <text x="48" y="54" font-size="17" font-weight="700" letter-spacing="2" fill="#0f766e">FROM ITERATION TO REPRODUCTION</text>
+    <text x="48" y="103" font-size="34" font-weight="700" fill="#0f172a">Optimize the query path. Check what transfers.</text>
+    <text x="48" y="139" font-size="21" fill="#64748b">Research workflow summarized from the DiskANN-RSI study</text>
+
+    <rect x="48" y="180" width="224" height="186" rx="14" fill="#eff6ff" stroke="#bfdbfe"/>
+    <text x="70" y="215" font-size="17" font-weight="700" fill="#2563eb">01 / PROPOSE</text>
+    <text x="70" y="251" font-size="24" font-weight="700" fill="#0f172a">Find a lever</text>
+    <text x="70" y="287" font-size="19" fill="#475569">Visited-set locality</text>
+    <text x="70" y="316" font-size="19" fill="#475569">Search termination</text>
+    <text x="70" y="345" font-size="19" fill="#475569">Compiler settings</text>
+
+    <rect x="296" y="180" width="224" height="186" rx="14" fill="#eff6ff" stroke="#bfdbfe"/>
+    <text x="318" y="215" font-size="17" font-weight="700" fill="#2563eb">02 / IMPLEMENT</text>
+    <text x="318" y="251" font-size="24" font-weight="700" fill="#0f172a">Change the path</text>
+    <text x="318" y="287" font-size="19" fill="#475569">Rust index changes</text>
+    <text x="318" y="316" font-size="19" fill="#475569">Configurable levers</text>
+    <text x="318" y="345" font-size="19" fill="#475569">Release builds</text>
+
+    <rect x="544" y="180" width="224" height="186" rx="14" fill="#eff6ff" stroke="#bfdbfe"/>
+    <text x="566" y="215" font-size="17" font-weight="700" fill="#2563eb">03 / MEASURE</text>
+    <text x="566" y="251" font-size="24" font-weight="700" fill="#0f172a">Test the trade-off</text>
+    <text x="566" y="287" font-size="19" fill="#475569">QPS at target recall</text>
+    <text x="566" y="316" font-size="19" fill="#475569">Distance work</text>
+    <text x="566" y="345" font-size="19" fill="#475569">Latency and memory</text>
+
+    <rect x="792" y="180" width="224" height="186" rx="14" fill="#f0fdfa" stroke="#99f6e4"/>
+    <text x="814" y="215" font-size="17" font-weight="700" fill="#0f766e">04 / DECIDE</text>
+    <text x="814" y="251" font-size="24" font-weight="700" fill="#0f172a">Retain or revert</text>
+    <text x="814" y="287" font-size="19" fill="#475569">Keep useful changes</text>
+    <text x="814" y="316" font-size="19" fill="#475569">Reject regressions</text>
+    <text x="814" y="345" font-size="19" fill="#475569">Record negative results</text>
+
+    <rect x="1040" y="180" width="232" height="186" rx="14" fill="#f0fdfa" stroke="#99f6e4"/>
+    <text x="1062" y="215" font-size="17" font-weight="700" fill="#0f766e">05 / ITERATE</text>
+    <text x="1062" y="251" font-size="24" font-weight="700" fill="#0f172a">Use the feedback</text>
+    <text x="1062" y="287" font-size="19" fill="#475569">Refine the hypothesis</text>
+    <text x="1062" y="316" font-size="19" fill="#475569">Explore the next lever</text>
+    <text x="1062" y="345" font-size="19" fill="#475569">Preserve the evidence</text>
+
+    <g fill="none" stroke="#94a3b8" stroke-width="2.5" marker-end="url(#arrow)">
+      <path d="M274 273 H292"/><path d="M522 273 H540"/><path d="M770 273 H788"/><path d="M1018 273 H1036"/>
+    </g>
+    <path d="M1156 368 V402 H160 V370" fill="none" stroke="#2563eb" stroke-width="2.5" marker-end="url(#blueArrow)"/>
+    <rect x="474" y="386" width="372" height="31" fill="#fff"/>
+    <text x="660" y="408" text-anchor="middle" font-size="18" font-weight="700" fill="#2563eb">FEEDBACK INTO THE NEXT ITERATION</text>
+
+    <rect x="48" y="456" width="1224" height="210" rx="16" fill="#f8fafc" stroke="#cbd5e1"/>
+    <text x="72" y="490" font-size="16" font-weight="700" letter-spacing="1.5" fill="#64748b">REPRODUCIBILITY CHECK</text>
+    <text x="72" y="533" font-size="25" font-weight="700" fill="#0f172a">Freeze the candidate</text>
+    <text x="72" y="568" font-size="19" fill="#475569">Retained index and configuration</text>
+    <text x="72" y="599" font-size="19" fill="#475569">Internal-harness measurements</text>
+
+    <path d="M408 548 H443" fill="none" stroke="#94a3b8" stroke-width="2.5" marker-end="url(#arrow)"/>
+    <text x="474" y="533" font-size="25" font-weight="700" fill="#0f172a">Compare on one machine</text>
+    <text x="474" y="568" font-size="19" fill="#475569">Stock Vamana · hnswlib · NSG</text>
+    <text x="474" y="599" font-size="19" fill="#475569">Shared recall / throughput protocol</text>
+
+    <path d="M834 548 H869" fill="none" stroke="#94a3b8" stroke-width="2.5" marker-end="url(#arrow)"/>
+    <text x="900" y="533" font-size="25" font-weight="700" fill="#0f766e">Check which gains transfer</text>
+    <text x="900" y="568" font-size="19" fill="#475569">Construction and thread scaling</text>
+    <text x="900" y="599" font-size="19" fill="#475569">Query gains vary with the protocol</text>
+
+    <text x="72" y="639" font-size="17" fill="#64748b">Released evidence: source changes · benchmark configuration · raw records · paper and runbook</text>
+    <text x="48" y="696" font-size="16" fill="#64748b">DiskANN-RSI / TerseMind</text>
+  </g>
+</svg>

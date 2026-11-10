@@ -1,0 +1,2284 @@
+diff --git a/.gitignore b/.gitignore
+index 42830a6..f424e04 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -336,4 +336,8 @@ target/
+ .history/
+ 
+ # Ignore local settings for claude code AI agent
+-.claude/settings.local.json
+\ No newline at end of file
++.claude/settings.local.json
++# SIFT1M benchmark data (too large for git). Regenerate with tools/prepare_sift1m.py
++generated_data/sift1m/
++# Synthetic 1M verification data (regenerate locally)
++generated_data/synth1m/
+diff --git a/Cargo.toml b/Cargo.toml
+index d2f7e58..28f4201 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -113,6 +113,7 @@ vfs = "0.12.1"
+ [profile.release]
+ opt-level = 3
+ codegen-units = 1
++lto = "fat"
+ debug = true
+ split-debuginfo = "packed"
+ 
+diff --git a/diskann-benchmark-core/src/search/graph/knn.rs b/diskann-benchmark-core/src/search/graph/knn.rs
+index 35501ab..171ad99 100644
+--- a/diskann-benchmark-core/src/search/graph/knn.rs
++++ b/diskann-benchmark-core/src/search/graph/knn.rs
+@@ -266,6 +266,15 @@ pub struct KnnParams {
+ impl KnnParams {
+     /// Construct a new [`KnnParams`].
+     pub fn new(k_value: usize, l_value: usize) -> Result<Self, KnnParamsError> {
++        Self::new_with_beam(k_value, l_value, None)
++    }
++
++    /// Construct a new [`KnnParams`] with an explicit beam width (defaults to 1 when `None`).
++    pub fn new_with_beam(
++        k_value: usize,
++        l_value: usize,
++        beam_width: Option<usize>,
++    ) -> Result<Self, KnnParamsError> {
+         let k_value = NonZeroUsize::new(k_value).ok_or(KnnParamsError::KZero)?;
+         if l_value < k_value.get() {
+             return Err(KnnParamsError::LLessThanK {
+@@ -274,7 +283,7 @@ impl KnnParams {
+             });
+         }
+ 
+-        let knn = graph::search::Knn::new(l_value, None)
++        let knn = graph::search::Knn::new(l_value, beam_width)
+             .map_err(|_| KnnParamsError::InvalidKnnParameters)?;
+         Ok(Self { k_value, knn })
+     }
+diff --git a/diskann-benchmark/src/index/benchmarks.rs b/diskann-benchmark/src/index/benchmarks.rs
+index 34ae5ff..4990cb4 100644
+--- a/diskann-benchmark/src/index/benchmarks.rs
++++ b/diskann-benchmark/src/index/benchmarks.rs
+@@ -42,7 +42,7 @@ use super::{
+ };
+ use crate::{
+     index::{
+-        result::{AggregatedSearchResults, BuildResult},
++        result::{AggregatedSearchResults, BuildResult, TopkSweepSummary, DEFAULT_RECALL_TARGET},
+         search::plugins,
+         streaming::{self, managed, stats::StreamStats, FullPrecisionStream, Managed},
+     },
+@@ -258,7 +258,20 @@ where
+             &Strategy::new(common::FullPrecision),
+         )?;
+ 
+-        let result = BuildResult::new(build_stats, search_results);
++        // For top-k sweeps, also report the best QPS achieved at or above the recall
++        // target: the standard QPS-at-recall operating point for ANN comparison.
++        let search_summary = match (&search_results, input.search_phase.as_topk()) {
++            (AggregatedSearchResults::Topk(results), Ok(topk)) => Some(TopkSweepSummary::compute(
++                results,
++                topk.recall_target.unwrap_or(DEFAULT_RECALL_TARGET),
++            )),
++            _ => None,
++        };
++
++        let result = BuildResult {
++            search_summary,
++            ..BuildResult::new(build_stats, search_results)
++        };
+ 
+         writeln!(output, "\n\n{}", result)?;
+         Ok(result)
+diff --git a/diskann-benchmark/src/index/inmem/scalar.rs b/diskann-benchmark/src/index/inmem/scalar.rs
+index b10fd87..7b7878f 100644
+--- a/diskann-benchmark/src/index/inmem/scalar.rs
++++ b/diskann-benchmark/src/index/inmem/scalar.rs
+@@ -75,7 +75,10 @@ mod imp {
+         index::{
+             benchmarks::{run_build, QueryType, Strategy},
+             build::{self, load_index, only_single_insert, save_index, BuildStats},
+-            result::{BuildResult, QuantBuildResult},
++            result::{
++                AggregatedSearchResults, BuildResult, DEFAULT_RECALL_TARGET, QuantBuildResult,
++                TopkSweepSummary,
++            },
+             search::plugins,
+         },
+         inputs::graph_index::{IndexSQOperation, IndexSource, SearchPhase},
+@@ -296,9 +299,22 @@ mod imp {
+                         )?
+                     };
+ 
++                    let search_summary = match (&search, input.index_operation.search_phase.as_topk()) {
++                        (AggregatedSearchResults::Topk(results), Ok(topk)) => {
++                            Some(TopkSweepSummary::compute(
++                                results,
++                                topk.recall_target.unwrap_or(DEFAULT_RECALL_TARGET),
++                            ))
++                        }
++                        _ => None,
++                    };
++
+                     let result = QuantBuildResult {
+                         quant_training_time,
+-                        build: BuildResult::new(build_stats, search),
++                        build: BuildResult {
++                            search_summary,
++                            ..BuildResult::new(build_stats, search)
++                        },
+                     };
+ 
+                     writeln!(output, "\n\n{}", result)?;
+diff --git a/diskann-benchmark/src/index/result.rs b/diskann-benchmark/src/index/result.rs
+index 84229c9..8761eb4 100644
+--- a/diskann-benchmark/src/index/result.rs
++++ b/diskann-benchmark/src/index/result.rs
+@@ -19,11 +19,17 @@ use crate::{
+ pub(crate) struct BuildResult {
+     pub(crate) build: Option<BuildStats>,
+     pub(crate) search: AggregatedSearchResults,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub(crate) search_summary: Option<TopkSweepSummary>,
+ }
+ 
+ impl BuildResult {
+     pub(crate) fn new(build: Option<BuildStats>, search: AggregatedSearchResults) -> Self {
+-        Self { build, search }
++        Self {
++            build,
++            search,
++            search_summary: None,
++        }
+     }
+ }
+ 
+@@ -35,6 +41,10 @@ impl std::fmt::Display for BuildResult {
+ 
+         self.search.fmt(f)?;
+ 
++        if let Some(ref summary) = self.search_summary {
++            writeln!(f, "{}", summary)?;
++        }
++
+         Ok(())
+     }
+ }
+@@ -72,6 +82,98 @@ pub(crate) enum AggregatedSearchResults {
+     Range(Vec<RangeSearchResults>),
+ }
+ 
++/// The default recall threshold for [`TopkSweepSummary`] when the job does not specify one.
++pub(crate) const DEFAULT_RECALL_TARGET: f64 = 0.95;
++
++//////////////////////
++// TopkSweepSummary //
++//////////////////////
++
++/// Sweep-level summary reporting the best QPS achieved at or above a recall target.
++///
++/// This is the standard comparison metric for ANN search ("QPS at a given recall"): it
++/// rewards configurations that reach the recall target cheaply and ignores extra recall
++/// bought with wasted computation.
++#[derive(Debug, Serialize)]
++pub(crate) struct TopkSweepSummary {
++    /// The recall threshold a configuration must reach to qualify.
++    pub(crate) recall_target: f64,
++    /// One entry per swept thread count.
++    pub(crate) per_thread: Vec<QpsAtRecall>,
++}
++
++impl TopkSweepSummary {
++    /// Compute the summary from a completed top-k sweep.
++    pub(crate) fn compute(results: &[SearchResults], recall_target: f64) -> Self {
++        let mut thread_counts: Vec<usize> = results.iter().map(|r| r.num_tasks).collect();
++        thread_counts.sort_unstable();
++        thread_counts.dedup();
++
++        let per_thread = thread_counts
++            .into_iter()
++            .map(|num_tasks| {
++                let best = results
++                    .iter()
++                    .filter(|r| r.num_tasks == num_tasks && r.recall.average >= recall_target)
++                    .map(|r| (percentiles::mean(&r.qps).unwrap_or(0.0), r))
++                    .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
++
++                match best {
++                    Some((qps, r)) => QpsAtRecall {
++                        num_tasks,
++                        qps_at_recall: qps,
++                        search_l: Some(r.search_l),
++                        achieved_recall: Some(r.recall.average),
++                    },
++                    None => QpsAtRecall {
++                        num_tasks,
++                        qps_at_recall: 0.0,
++                        search_l: None,
++                        achieved_recall: None,
++                    },
++                }
++            })
++            .collect();
++
++        Self {
++            recall_target,
++            per_thread,
++        }
++    }
++}
++
++impl std::fmt::Display for TopkSweepSummary {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        write!(f, "QPS @ recall>={:.2}: ", self.recall_target)?;
++        for (i, entry) in self.per_thread.iter().enumerate() {
++            if i > 0 {
++                write!(f, ", ")?;
++            }
++            match (entry.search_l, entry.achieved_recall) {
++                (Some(search_l), Some(recall)) => write!(
++                    f,
++                    "{}T={:.1} (Ls={}, recall={:.4})",
++                    entry.num_tasks, entry.qps_at_recall, search_l, recall
++                )?,
++                _ => write!(f, "{}T=0.0 (no config reached target)", entry.num_tasks)?,
++            }
++        }
++        Ok(())
++    }
++}
++
++/// The best-QPS-at-recall entry for a single thread count.
++#[derive(Debug, Serialize)]
++pub(crate) struct QpsAtRecall {
++    pub(crate) num_tasks: usize,
++    /// The highest mean QPS among configs with recall >= target; 0.0 if none qualify.
++    pub(crate) qps_at_recall: f64,
++    /// The `search_l` achieving `qps_at_recall`, if any config qualified.
++    pub(crate) search_l: Option<usize>,
++    /// The recall of the qualifying config, if any.
++    pub(crate) achieved_recall: Option<f64>,
++}
++
+ impl std::fmt::Display for AggregatedSearchResults {
+     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+         match self {
+diff --git a/diskann-benchmark/src/index/search/knn.rs b/diskann-benchmark/src/index/search/knn.rs
+index ff6ba0c..1957cee 100644
+--- a/diskann-benchmark/src/index/search/knn.rs
++++ b/diskann-benchmark/src/index/search/knn.rs
+@@ -53,7 +53,19 @@ pub(crate) fn run<I>(
+                 .search_l
+                 .iter()
+                 .map(|search_l| {
+-                    let search_params = KnnParams::new(run.search_n, *search_l).unwrap();
++                    let mut search_params =
++                        KnnParams::new_with_beam(run.search_n, *search_l, run.beam_width).unwrap();
++
++                    if let Some(ratio) = run.early_stop_ratio {
++                        search_params.knn =
++                            search_params
++                                .knn
++                                .with_early_stop(diskann::graph::search::EarlyStop {
++                                    k: run.search_n,
++                                    ratio,
++                                    min_hops: run.early_stop_min_hops.unwrap_or(8),
++                                });
++                    }
+ 
+                     core_search::Run::new(search_params, setup.clone())
+                 })
+diff --git a/diskann-benchmark/src/inputs/graph_index.rs b/diskann-benchmark/src/inputs/graph_index.rs
+index c7ed6c1..9202dad 100644
+--- a/diskann-benchmark/src/inputs/graph_index.rs
++++ b/diskann-benchmark/src/inputs/graph_index.rs
+@@ -46,6 +46,18 @@ pub(crate) struct GraphSearch {
+     pub(crate) search_n: usize,
+     pub(crate) search_l: Vec<usize>,
+     pub(crate) recall_k: usize,
++    /// Optional beam width for graph exploration (defaults to 1). Values > 1 expand
++    /// multiple frontier nodes per hop, trading more work per hop for fewer hops.
++    #[serde(default)]
++    pub(crate) beam_width: Option<usize>,
++    /// Optional adaptive early termination ratio. When set, the search stops once the
++    /// closest unvisited candidate is farther than `search_n`-th distance times this
++    /// ratio (see `EarlyStop`). Disabled when absent.
++    #[serde(default)]
++    pub(crate) early_stop_ratio: Option<f32>,
++    /// Minimum number of hops before early termination may trigger.
++    #[serde(default)]
++    pub(crate) early_stop_min_hops: Option<u32>,
+ }
+ 
+ impl GraphSearch {
+@@ -110,6 +122,10 @@ pub(crate) struct TopkSearchPhase {
+     // Enable sweeping threads
+     pub(crate) num_threads: Vec<NonZeroUsize>,
+     pub(crate) runs: Vec<GraphSearch>,
++    /// Recall threshold used for the sweep-level `qps_at_recall` summary metric.
++    /// Defaults to 0.95 when absent.
++    #[serde(default)]
++    pub(crate) recall_target: Option<f64>,
+ }
+ 
+ impl TopkSearchPhase {
+@@ -144,6 +160,9 @@ impl Example for TopkSearchPhase {
+             search_n: 10,
+             search_l: vec![10, 20, 30, 40],
+             recall_k: 10,
++            beam_width: None,
++            early_stop_ratio: None,
++            early_stop_min_hops: None,
+         }];
+ 
+         Self {
+@@ -152,6 +171,7 @@ impl Example for TopkSearchPhase {
+             reps: REPS,
+             num_threads: THREAD_COUNTS.to_vec(),
+             runs,
++            recall_target: None,
+         }
+     }
+ }
+@@ -419,6 +439,9 @@ impl Example for TopkDeterminantDiversityPhase {
+                 search_n: 10,
+                 search_l: vec![10, 20, 30, 40],
+                 recall_k: 10,
++                beam_width: None,
++                early_stop_ratio: None,
++                early_stop_min_hops: None,
+             }],
+             power: 1.0,
+             eta: 0.5,
+@@ -722,6 +745,9 @@ pub(crate) struct IndexBuild {
+     num_threads: usize,
+     multi_insert: Option<MultiInsert>,
+     save_path: Option<String>,
++    /// Vector prefetch distance during search expansion (defaults to 8 when absent).
++    #[serde(default)]
++    prefetch_lookahead: Option<usize>,
+ }
+ 
+ impl IndexBuild {
+@@ -793,7 +819,7 @@ impl IndexBuild {
+             metric: self.distance.into(),
+             dim,
+             max_degree: self.exact_max_degree() as u32,
+-            prefetch_lookahead: None,
++            prefetch_lookahead: self.prefetch_lookahead,
+             prefetch_cache_line_level: None,
+         }
+     }
+@@ -892,6 +918,7 @@ impl Example for IndexBuild {
+             insert_retry: None,
+             start_point_strategy: StartPointStrategy::Medoid,
+             save_path: None,
++            prefetch_lookahead: None,
+         }
+     }
+ }
+diff --git a/diskann-tools/src/bin/convert_vecs.rs b/diskann-tools/src/bin/convert_vecs.rs
+new file mode 100644
+index 0000000..9ea3ba4
+--- /dev/null
++++ b/diskann-tools/src/bin/convert_vecs.rs
+@@ -0,0 +1,211 @@
++/*
++ * Copyright (c) Microsoft Corporation.
++ * Licensed under the MIT license.
++ */
++
++//! Converts `.fvecs`/`.ivecs` files (the row-prefixed format used by the public TEXMEX
++//! benchmark datasets such as SIFT1M) into DiskANN's `.fbin` and ground-truth formats.
++//!
++//! `.fvecs` rows are `[dim: i32][dim x f32]` and `.ivecs` rows are `[dim: i32][dim x i32]`.
++//! `.fbin` is `[npoints: u32][ndims: u32]` followed by tightly packed row-major data.
++
++use std::{
++    fs::File,
++    io::{BufWriter, Read, Seek, SeekFrom, Write},
++    path::PathBuf,
++};
++
++use anyhow::{bail, Context};
++use bytemuck::cast_slice;
++use clap::{Parser, Subcommand};
++use diskann_tools::utils::init_subscriber;
++use diskann_utils::io::{read_bin, Metadata};
++use diskann_vector::distance::{DistanceProvider, Metric};
++
++#[derive(Debug, Parser)]
++#[command(about = "Convert .fvecs/.ivecs datasets to .fbin and ground-truth formats")]
++struct ConvertVecsArgs {
++    #[command(subcommand)]
++    command: Command,
++}
++
++#[derive(Debug, Subcommand)]
++enum Command {
++    /// Convert a .fvecs vector file to .fbin.
++    Fvecs2Fbin {
++        /// Input .fvecs file.
++        #[arg(long, short)]
++        input: PathBuf,
++        /// Output .fbin file.
++        #[arg(long, short)]
++        output: PathBuf,
++    },
++    /// Convert an .ivecs ground-truth file to the DiskANN ground-truth format, computing
++    /// exact (squared L2) distances for each ground-truth neighbor.
++    Ivecs2Gt {
++        /// Input .ivecs file with one top-K row per query.
++        #[arg(long, short)]
++        input: PathBuf,
++        /// Base vectors (.fbin) the ground-truth ids refer to.
++        #[arg(long, short)]
++        base: PathBuf,
++        /// Query vectors (.fbin), one per .ivecs row.
++        #[arg(long, short)]
++        query: PathBuf,
++        /// Output ground-truth file.
++        #[arg(long, short)]
++        output: PathBuf,
++    },
++}
++
++fn main() -> anyhow::Result<()> {
++    init_subscriber();
++
++    match ConvertVecsArgs::parse().command {
++        Command::Fvecs2Fbin { input, output } => fvecs_to_fbin(&input, &output),
++        Command::Ivecs2Gt {
++            input,
++            base,
++            query,
++            output,
++        } => ivecs_to_ground_truth(&input, &base, &query, &output),
++    }
++}
++
++/// Read the row dimensionality and row count of a `.fvecs`/`.ivecs` file.
++fn vecs_shape(file: &mut File, elem_size: usize) -> anyhow::Result<(usize, usize)> {
++    let file_len = file.metadata()?.len() as usize;
++    if file_len < 4 {
++        bail!("file too small to contain a row dimension");
++    }
++
++    let mut dim_buf = [0u8; 4];
++    file.read_exact(&mut dim_buf)?;
++    file.seek(SeekFrom::Start(0))?;
++    let dim = i32::from_le_bytes(dim_buf);
++    if dim <= 0 {
++        bail!("invalid row dimension {dim}");
++    }
++    let dim = dim as usize;
++
++    let row_bytes = 4 + dim * elem_size;
++    if !file_len.is_multiple_of(row_bytes) {
++        bail!("file size {file_len} is not a multiple of the row size {row_bytes} (dim {dim})");
++    }
++
++    Ok((file_len / row_bytes, dim))
++}
++
++fn fvecs_to_fbin(input: &PathBuf, output: &PathBuf) -> anyhow::Result<()> {
++    let mut reader = File::open(input).with_context(|| format!("open {input:?}"))?;
++    let (nrows, dim) = vecs_shape(&mut reader, size_of::<f32>())?;
++    tracing::info!("converting {nrows} x {dim} f32 vectors from {input:?}");
++    reader.seek(SeekFrom::Start(0))?;
++
++    let mut writer =
++        BufWriter::new(File::create(output).with_context(|| format!("create {output:?}"))?);
++    Metadata::new(nrows as u32, dim as u32)?.write(&mut writer)?;
++
++    // Convert in chunks to bound peak memory on multi-GB inputs.
++    let row_bytes = 4 + dim * size_of::<f32>();
++    let chunk_rows = (64 * 1024 * 1024 / row_bytes).max(1);
++    let mut raw_chunk = vec![0u8; chunk_rows * row_bytes];
++    let mut out_chunk: Vec<f32> = Vec::with_capacity(chunk_rows * dim);
++
++    let mut rows_done = 0;
++    while rows_done < nrows {
++        let rows = (nrows - rows_done).min(chunk_rows);
++        reader.read_exact(&mut raw_chunk[..rows * row_bytes])?;
++
++        out_chunk.clear();
++        for row in raw_chunk[..rows * row_bytes].chunks_exact(row_bytes) {
++            let payload: &[f32] = cast_slice(&row[4..]);
++            out_chunk.extend_from_slice(payload);
++        }
++        writer.write_all(cast_slice(&out_chunk))?;
++
++        rows_done += rows;
++    }
++
++    writer.flush()?;
++    tracing::info!("wrote {rows_done} vectors to {output:?}");
++    Ok(())
++}
++
++fn ivecs_to_ground_truth(
++    input: &PathBuf,
++    base: &PathBuf,
++    query: &PathBuf,
++    output: &PathBuf,
++) -> anyhow::Result<()> {
++    let mut reader = File::open(input).with_context(|| format!("open {input:?}"))?;
++    let (num_queries, k) = vecs_shape(&mut reader, size_of::<i32>())?;
++    tracing::info!("converting {num_queries} x {k} ground-truth rows from {input:?}");
++    reader.seek(SeekFrom::Start(0))?;
++
++    // The ids of all queries fit comfortably in memory (num_queries * k * 4 bytes).
++    let row_bytes = 4 + k * size_of::<i32>();
++    let mut raw = vec![0u8; num_queries * row_bytes];
++    reader.read_exact(&mut raw)?;
++
++    let mut gt_ids: Vec<u32> = Vec::with_capacity(num_queries * k);
++    for row in raw.chunks_exact(row_bytes) {
++        let payload: &[i32] = cast_slice(&row[4..]);
++        for &id in payload {
++            if id < 0 {
++                bail!("negative neighbor id {id}");
++            }
++            gt_ids.push(id as u32);
++        }
++    }
++
++    // Load base and query vectors to compute exact distances for the ground-truth ids.
++    let mut base_reader = File::open(base).with_context(|| format!("open {base:?}"))?;
++    let base = read_bin::<f32>(&mut base_reader).with_context(|| format!("read {base:?}"))?;
++    let mut query_reader = File::open(query).with_context(|| format!("open {query:?}"))?;
++    let queries = read_bin::<f32>(&mut query_reader).with_context(|| format!("read {query:?}"))?;
++
++    if queries.nrows() != num_queries {
++        bail!(
++            "query count {} does not match ground-truth rows {num_queries}",
++            queries.nrows()
++        );
++    }
++    if queries.ncols() != base.ncols() {
++        bail!(
++            "query dim {} does not match base dim {}",
++            queries.ncols(),
++            base.ncols()
++        );
++    }
++
++    let dim = base.ncols();
++    let distance = <f32 as DistanceProvider<f32>>::distance_comparer(Metric::L2, Some(dim));
++
++    let base_view = base.as_view();
++    let query_view = queries.as_view();
++    let mut gt_distances: Vec<f32> = Vec::with_capacity(num_queries * k);
++    for (q, ids) in gt_ids.chunks_exact(k).enumerate() {
++        let query_row = query_view.row(q);
++        for &id in ids {
++            let id = id as usize;
++            if id >= base.nrows() {
++                bail!(
++                    "ground-truth id {id} out of range for {} base vectors",
++                    base.nrows()
++                );
++            }
++            gt_distances.push(distance.call(query_row, base_view.row(id)));
++        }
++    }
++
++    let mut writer =
++        BufWriter::new(File::create(output).with_context(|| format!("create {output:?}"))?);
++    Metadata::new(num_queries as u32, k as u32)?.write(&mut writer)?;
++    writer.write_all(cast_slice(&gt_ids))?;
++    writer.write_all(cast_slice(&gt_distances))?;
++    writer.flush()?;
++
++    tracing::info!("wrote ground truth for {num_queries} queries (k={k}) to {output:?}");
++    Ok(())
++}
+diff --git a/diskann/src/graph/glue.rs b/diskann/src/graph/glue.rs
+index dd5ed06..7597316 100644
+--- a/diskann/src/graph/glue.rs
++++ b/diskann/src/graph/glue.rs
+@@ -518,47 +518,83 @@ pub trait PredicateMut<T> {
+ /// on element inclusion.
+ pub trait HybridPredicate<T>: Predicate<T> + PredicateMut<T> {}
+ 
+-/// A [`HybridPredicate`] using a hash-set as its implementation. The implementation of
+-/// [`Predicate`] checks for presence in the table while [`PredicateMut`] tries to insert the
+-/// item, indicates whether or not the item already existed.
+-pub struct NotInMut<'a, K>(&'a mut hashbrown::HashSet<K>);
++/// A set of visited ids backing [`NotInMut`].
++///
++/// Implementations must guarantee that [`VisitedTracker::mark_visited`] returns `true`
++/// at most once per distinct item (until the set is cleared), and that it never flips an
++/// already-visited item back to unvisited, as required by [`PredicateMut`].
++pub trait VisitedTracker<T> {
++    /// Mark `item` as visited, returning `true` if it was not visited before.
++    fn mark_visited(&mut self, item: &T) -> bool;
++
++    /// Return whether `item` has been visited.
++    fn is_visited(&self, item: &T) -> bool;
++}
++
++impl<T> VisitedTracker<T> for hashbrown::HashSet<T>
++where
++    T: Clone + Eq + std::hash::Hash,
++{
++    fn mark_visited(&mut self, item: &T) -> bool {
++        self.insert(item.clone())
++    }
++
++    fn is_visited(&self, item: &T) -> bool {
++        self.contains(item)
++    }
++}
++
++/// A [`HybridPredicate`] over a [`VisitedTracker`] implementation. The implementation of
++/// [`Predicate`] checks for presence in the set while [`PredicateMut`] tries to mark the
++/// item visited, indicating whether or not the item had already been visited.
++///
++/// The tracked id type `T` appears as a phantom parameter so that the plain
++/// [`PredicateMut<T>`] and the [`Accept`]-unwrapping [`PredicateMut<Accept<T>>`]
++/// implementations remain disjoint.
++pub struct NotInMut<'a, S, T> {
++    set: &'a mut S,
++    _marker: std::marker::PhantomData<fn() -> T>,
++}
+ 
+-impl<'a, K> NotInMut<'a, K> {
++impl<'a, S, T> NotInMut<'a, S, T> {
+     /// Construct a new `NotInMut` around `set`.
+-    pub fn new(set: &'a mut hashbrown::HashSet<K>) -> Self {
+-        Self(set)
++    pub fn new(set: &'a mut S) -> Self {
++        Self {
++            set,
++            _marker: std::marker::PhantomData,
++        }
+     }
+ }
+ 
+-impl<T> Predicate<T> for NotInMut<'_, T>
++impl<T, S> Predicate<T> for NotInMut<'_, S, T>
+ where
+-    T: Eq + std::hash::Hash,
++    S: VisitedTracker<T>,
+ {
+     fn eval(&self, item: &T) -> bool {
+-        !self.0.contains(item)
++        !self.set.is_visited(item)
+     }
+ }
+ 
+-impl<T> PredicateMut<T> for NotInMut<'_, T>
++impl<T, S> PredicateMut<T> for NotInMut<'_, S, T>
+ where
+-    T: Clone + Eq + std::hash::Hash,
++    S: VisitedTracker<T>,
+ {
+     fn eval_mut(&mut self, item: &T) -> bool {
+-        self.0.insert(item.clone())
++        self.set.mark_visited(item)
+     }
+ }
+ 
+-impl<T> PredicateMut<Accept<T>> for NotInMut<'_, T>
++impl<T, S> PredicateMut<Accept<T>> for NotInMut<'_, S, T>
+ where
+-    T: Clone + Eq + std::hash::Hash,
++    S: VisitedTracker<T>,
+ {
+     fn eval_mut(&mut self, item: &Accept<T>) -> bool {
+-        self.eval_mut(item.get())
++        self.set.mark_visited(item.get())
+     }
+ }
+ 
+-/// The interfaces `contains` and `insert` agree with each other.
+-impl<T> HybridPredicate<T> for NotInMut<'_, T> where T: Clone + Eq + std::hash::Hash {}
++/// The interfaces `is_visited` and `mark_visited` agree with each other.
++impl<T, S> HybridPredicate<T> for NotInMut<'_, S, T> where S: VisitedTracker<T> {}
+ 
+ /// A search strategy for query objects of type `T`.
+ ///
+diff --git a/diskann/src/graph/index.rs b/diskann/src/graph/index.rs
+index 7de8293..2855910 100644
+--- a/diskann/src/graph/index.rs
++++ b/diskann/src/graph/index.rs
+@@ -30,7 +30,7 @@ use super::{
+     },
+     internal::{BackedgeBuffer, SortedNeighbors, prune},
+     search::{
+-        PagedSearch,
++        EarlyStop, PagedSearch,
+         record::{NoopSearchRecord, SearchRecord, VisitedSearchRecord},
+         scratch::{self, PriorityQueueConfiguration, SearchScratch, SearchScratchParams},
+     },
+@@ -275,6 +275,7 @@ where
+ 
+                 self.search_internal(
+                     None, // beam_width
++                    None, // early_stop
+                     &mut accessor,
+                     &mut scratch,
+                     &mut search_record,
+@@ -387,6 +388,7 @@ where
+ 
+                 self.search_internal(
+                     None, // beam_width
++                    None, // early_stop
+                     &mut accessor,
+                     &mut scratch,
+                     &mut search_record,
+@@ -1189,6 +1191,7 @@ where
+ 
+             self.search_internal(
+                 None, // beam_width
++                None, // early_stop
+                 &mut search_accessor,
+                 &mut scratch,
+                 &mut NoopSearchRecord::new(),
+@@ -1933,6 +1936,7 @@ where
+     pub(crate) fn search_internal<A, SR, Q>(
+         &self,
+         beam_width: Option<usize>,
++        early_stop: Option<EarlyStop>,
+         accessor: &mut A,
+         scratch: &mut SearchScratch<DP::InternalId, Q>,
+         search_record: &mut SR,
+@@ -1989,6 +1993,17 @@ where
+ 
+                 scratch.cmps += neighbors.len() as u32;
+                 scratch.hops += scratch.beam_nodes.len() as u32;
++
++                if let Some(early_stop) = early_stop
++                    && scratch.best.should_stop_early(
++                        early_stop.k,
++                        early_stop.ratio,
++                        early_stop.min_hops,
++                        scratch.hops,
++                    )
++                {
++                    break;
++                }
+             }
+ 
+             Ok(InternalSearchStats {
+diff --git a/diskann/src/graph/search/diverse_search.rs b/diskann/src/graph/search/diverse_search.rs
+index 44ffbb2..928a627 100644
+--- a/diskann/src/graph/search/diverse_search.rs
++++ b/diskann/src/graph/search/diverse_search.rs
+@@ -6,11 +6,14 @@
+ //! Diversity-aware search.
+ 
+ use diskann_utils::future::SendFuture;
+-use hashbrown::HashSet;
+ use std::num::NonZeroUsize;
+ use thiserror::Error;
+ 
+-use super::{Knn, Search, record::NoopSearchRecord, scratch::SearchScratch};
++use super::{
++    Knn, Search,
++    record::NoopSearchRecord,
++    scratch::{SearchScratch, StampedVisitedSet},
++};
+ use crate::{
+     ANNError, ANNResult,
+     error::IntoANNResult,
+@@ -164,7 +167,7 @@ where
+ 
+         SearchScratch {
+             best: diverse_queue,
+-            visited: HashSet::with_capacity(
++            visited: StampedVisitedSet::with_capacity(
+                 index.estimate_visited_set_capacity(Some(self.inner.l_value().get())),
+             ),
+             id_scratch: Vec::with_capacity(index.max_degree_with_slack()),
+@@ -210,6 +213,7 @@ where
+             let stats = index
+                 .search_internal(
+                     Some(self.inner.beam_width().get()),
++                    None, // early_stop
+                     &mut accessor,
+                     &mut diverse_scratch,
+                     &mut NoopSearchRecord::new(),
+diff --git a/diskann/src/graph/search/knn_search.rs b/diskann/src/graph/search/knn_search.rs
+index b61a407..3049d82 100644
+--- a/diskann/src/graph/search/knn_search.rs
++++ b/diskann/src/graph/search/knn_search.rs
+@@ -34,6 +34,30 @@ pub enum KnnSearchError {
+ 
+ convert_error!(KnnSearchError);
+ 
++/// Adaptive early-termination parameters for [`Knn`] beam search.
++///
++/// When set, the search stops once at least `min_hops` hops have been taken and the
++/// closest unvisited candidate is farther from the query than `ratio` times the current
++/// `k`-th best candidate distance (see
++/// [`crate::neighbor::NeighborPriorityQueue::should_stop_early`]). Beyond that point the
++/// frontier is unlikely to improve the top-`k` result, so easy queries finish early
++/// instead of always visiting the full `l_value` window.
++///
++/// `ratio` is expressed in the distance space of the index (squared for `squared_l2`);
++/// `ratio == 1.0` is the most aggressive setting and larger values are progressively
++/// more conservative.
++#[derive(Debug, Clone, Copy)]
++pub struct EarlyStop {
++    /// The result count whose k-th best distance is tracked.
++    pub k: usize,
++
++    /// Frontier-to-kth-distance ratio above which the search stops.
++    pub ratio: f32,
++
++    /// Minimum number of hops before early termination may trigger.
++    pub min_hops: u32,
++}
++
+ /// Standard k-NN (k-nearest neighbor) graph-based search parameters.
+ ///
+ /// This is the primary search type for approximate nearest neighbor queries. It performs
+@@ -68,6 +92,8 @@ pub struct Knn {
+     l_value: NonZeroUsize,
+     /// Beam width for parallel graph exploration (defaults to 1).
+     beam_width: NonZeroUsize,
++    /// Optional adaptive early termination (disabled by default).
++    early_stop: Option<EarlyStop>,
+ }
+ 
+ impl Knn {
+@@ -91,6 +117,7 @@ impl Knn {
+         Ok(Self {
+             l_value,
+             beam_width,
++            early_stop: None,
+         })
+     }
+ 
+@@ -99,6 +126,12 @@ impl Knn {
+         Self::new(l_value, None)
+     }
+ 
++    /// Enable adaptive early termination for these parameters.
++    pub fn with_early_stop(mut self, early_stop: EarlyStop) -> Self {
++        self.early_stop = Some(early_stop);
++        self
++    }
++
+     /// Returns the search list size.
+     #[inline]
+     pub fn l_value(&self) -> NonZeroUsize {
+@@ -111,10 +144,17 @@ impl Knn {
+         self.beam_width
+     }
+ 
++    /// Returns the adaptive early-termination configuration, if enabled.
++    #[inline]
++    pub fn early_stop(&self) -> Option<EarlyStop> {
++        self.early_stop
++    }
++
+     pub(crate) fn new_infallible(l_value: NonZeroUsize, beam_width: NonZeroUsize) -> Self {
+         Self {
+             l_value,
+             beam_width,
++            early_stop: None,
+         }
+     }
+ }
+@@ -177,6 +217,7 @@ where
+             let stats = index
+                 .search_internal(
+                     Some(self.beam_width.get()),
++                    self.early_stop,
+                     &mut accessor,
+                     &mut scratch,
+                     &mut NoopSearchRecord::new(),
+@@ -249,6 +290,7 @@ where
+             let stats = index
+                 .search_internal(
+                     Some(self.inner.beam_width.get()),
++                    self.inner.early_stop,
+                     &mut accessor,
+                     &mut scratch,
+                     self.recorder,
+diff --git a/diskann/src/graph/search/mod.rs b/diskann/src/graph/search/mod.rs
+index b361e48..e0153c2 100644
+--- a/diskann/src/graph/search/mod.rs
++++ b/diskann/src/graph/search/mod.rs
+@@ -116,7 +116,7 @@ where
+ 
+ pub use filtered_range_search::FilteredRange;
+ pub use inline_filter_search::{AdaptiveL, InlineFilterSearch};
+-pub use knn_search::{Knn, KnnSearchError, RecordedKnn};
++pub use knn_search::{EarlyStop, Knn, KnnSearchError, RecordedKnn};
+ pub use multihop_filter_search::MultihopFilterSearch;
+ pub use range_search::{Range, RangeBuilder, RangeSearchError};
+ 
+diff --git a/diskann/src/graph/search/paged.rs b/diskann/src/graph/search/paged.rs
+index 6c01418..dc75c6f 100644
+--- a/diskann/src/graph/search/paged.rs
++++ b/diskann/src/graph/search/paged.rs
+@@ -101,6 +101,7 @@ where
+             self.index
+                 .search_internal(
+                     None, // beam_width
++                    None, // early_stop
+                     &mut self.accessor,
+                     &mut self.scratch,
+                     &mut NoopSearchRecord::new(),
+diff --git a/diskann/src/graph/search/range_search.rs b/diskann/src/graph/search/range_search.rs
+index 8c143e0..e5f9d9a 100644
+--- a/diskann/src/graph/search/range_search.rs
++++ b/diskann/src/graph/search/range_search.rs
+@@ -276,6 +276,7 @@ where
+             let initial_stats = index
+                 .search_internal(
+                     Some(self.beam_width().get()),
++                    None, // early_stop
+                     &mut accessor,
+                     &mut scratch,
+                     &mut NoopSearchRecord::new(),
+diff --git a/diskann/src/graph/search/scratch.rs b/diskann/src/graph/search/scratch.rs
+index 2670f11..f040eeb 100644
+--- a/diskann/src/graph/search/scratch.rs
++++ b/diskann/src/graph/search/scratch.rs
+@@ -7,14 +7,14 @@
+ 
+ //! Scratch space for in-memory index based search
+ 
+-use std::collections::VecDeque;
++use std::{collections::VecDeque, marker::PhantomData};
+ 
+ use crate::{
++    graph::glue::VisitedTracker,
+     neighbor::{Neighbor, NeighborPriorityQueue},
+-    utils::VectorId,
++    utils::{IntoUsize, VectorId},
+ };
+ use diskann_utils::object_pool::AsPooled;
+-use hashbrown::HashSet;
+ 
+ /// In-mem index related limits
+ pub const GRAPH_SLACK_FACTOR: f64 = 1.3_f64;
+@@ -45,7 +45,7 @@ where
+     /// Used by both sync and async.
+     ///
+     /// This is used to prevent multiple requests to the same `id` from the vector providers.
+-    pub visited: HashSet<I>,
++    pub visited: StampedVisitedSet<I>,
+ 
+     /// A buffer for adjacency lists.
+     ///
+@@ -90,6 +90,146 @@ pub enum PriorityQueueConfiguration {
+     Resizable(usize),
+ }
+ 
++/// A visited-id set backed by a dense, epoch-stamped array.
++///
++/// This is a drop-in replacement for the `HashSet` previously used to deduplicate graph
++/// traversal. `insert`/`contains` become unchecked array accesses instead of hashing,
++/// which matters because every raw adjacency entry scanned during search passes through
++/// this set (tens of millions of probes per query sweep on large graphs).
++///
++/// Each slot holds the 16-bit epoch in which the id was last inserted (2 bytes per id,
++/// keeping the array cache-resident at million-point scale); `clear` simply bumps the
++/// epoch, so resetting the set between queries is O(1) regardless of how many ids were
++/// visited. The backing array grows on demand (doubling) up to the largest id seen, and
++/// is reused across queries via the scratch pool.
++///
++/// Ids at or beyond [`MAX_DENSE_SLOTS`] (sentinel ids such as `u32::MAX`, which test
++/// providers use for start points) are tracked in a small overflow hash set instead of
++/// growing the dense array to absurd sizes.
++#[derive(Debug)]
++pub struct StampedVisitedSet<I> {
++    /// One slot per id; a slot equal to `epoch` means the id is in the set.
++    stamps: Vec<u16>,
++
++    /// The current epoch. Wraps to 1 (with a full zeroing pass) on u16 overflow.
++    epoch: u16,
++
++    /// The number of ids inserted in the current epoch.
++    len: usize,
++
++    /// Sentinel/sparse ids that must not grow the dense array.
++    overflow: hashbrown::HashSet<I>,
++
++    _marker: PhantomData<I>,
++}
++
++/// Ids beyond this many slots are treated as sparse outliers and tracked in the overflow
++/// set instead of growing the dense array. This covers every realistic id space (DiskANN
++/// targets at most ~1B points) while keeping sentinel ids like `u32::MAX` from forcing a
++/// 16 GiB allocation.
++const MAX_DENSE_SLOTS: usize = 1 << 30;
++
++impl<I> Default for StampedVisitedSet<I> {
++    fn default() -> Self {
++        Self::new()
++    }
++}
++
++impl<I> StampedVisitedSet<I> {
++    /// Create an empty set with no preallocated storage.
++    pub fn new() -> Self {
++        Self::with_capacity(0)
++    }
++
++    /// Create an empty set with the stamp array presized to `capacity` slots.
++    pub fn with_capacity(capacity: usize) -> Self {
++        Self {
++            stamps: vec![0; capacity.min(MAX_DENSE_SLOTS)],
++            epoch: 1,
++            len: 0,
++            overflow: hashbrown::HashSet::new(),
++            _marker: PhantomData,
++        }
++    }
++
++    /// Return whether the set is empty.
++    pub fn is_empty(&self) -> bool {
++        self.len == 0
++    }
++
++    /// Reset the set to empty in O(1) by advancing the epoch.
++    pub fn clear(&mut self) {
++        self.len = 0;
++        self.overflow.clear();
++        self.epoch = self.epoch.wrapping_add(1);
++        if self.epoch == 0 {
++            // Wrapped through all 2^32 epochs: every stamp is potentially live, so
++            // zero the array and restart the epoch counter.
++            self.stamps.fill(0);
++            self.epoch = 1;
++        }
++    }
++}
++
++impl<I> StampedVisitedSet<I>
++where
++    I: IntoUsize + Copy + Eq + std::hash::Hash,
++{
++    /// Insert `id` into the set, returning `true` if it was not already present.
++    pub fn insert(&mut self, id: I) -> bool {
++        let idx = id.into_usize();
++        if idx >= self.stamps.len() {
++            if idx >= MAX_DENSE_SLOTS {
++                return self.overflow.insert(id);
++            }
++            let new_len = (idx + 1).max(self.stamps.len() * 2).max(64);
++            self.stamps.resize(new_len, 0);
++        }
++
++        if self.stamps[idx] == self.epoch {
++            return false;
++        }
++
++        self.stamps[idx] = self.epoch;
++        self.len += 1;
++        true
++    }
++
++    /// Return whether `id` is in the set.
++    pub fn contains(&self, id: &I) -> bool {
++        let idx = (*id).into_usize();
++        if idx < self.stamps.len() {
++            self.stamps[idx] == self.epoch
++        } else {
++            self.overflow.contains(id)
++        }
++    }
++}
++
++impl<I> Extend<I> for StampedVisitedSet<I>
++where
++    I: IntoUsize + Copy + Eq + std::hash::Hash,
++{
++    fn extend<T: IntoIterator<Item = I>>(&mut self, iter: T) {
++        for id in iter {
++            self.insert(id);
++        }
++    }
++}
++
++impl<I> VisitedTracker<I> for StampedVisitedSet<I>
++where
++    I: IntoUsize + Copy + Eq + std::hash::Hash,
++{
++    fn mark_visited(&mut self, item: &I) -> bool {
++        self.insert(*item)
++    }
++
++    fn is_visited(&self, item: &I) -> bool {
++        self.contains(item)
++    }
++}
++
+ impl<I> SearchScratch<I, NeighborPriorityQueue<I>>
+ where
+     I: VectorId,
+@@ -110,8 +250,8 @@ where
+     /// This method does not enable the beta-filtering feature.
+     pub fn new(nbest: PriorityQueueConfiguration, size_hint: Option<usize>) -> Self {
+         let visited = match size_hint {
+-            Some(size_hint) => HashSet::with_capacity(size_hint),
+-            None => HashSet::new(),
++            Some(size_hint) => StampedVisitedSet::with_capacity(size_hint),
++            None => StampedVisitedSet::new(),
+         };
+ 
+         let best = match nbest {
+@@ -243,7 +383,6 @@ mod tests {
+             assert!(!x.best.is_resizable());
+             assert_eq!(x.search_l(), 10);
+             assert_eq!(x.best.search_l(), 10);
+-            assert_eq!(x.visited.capacity(), 0);
+ 
+             assert!(x.visited.is_empty());
+             assert!(x.id_scratch.is_empty());
+@@ -261,7 +400,6 @@ mod tests {
+             assert!(x.best.is_resizable());
+             assert_eq!(x.search_l(), 10);
+             assert_eq!(x.best.search_l(), 10);
+-            assert_eq!(x.visited.capacity(), 0);
+ 
+             assert!(x.visited.is_empty());
+             assert!(x.id_scratch.is_empty());
+@@ -317,4 +455,67 @@ mod tests {
+         assert!(x.hops == 0);
+         assert!(x.cmps == 0);
+     }
++
++    #[test]
++    pub fn test_stamped_visited_set() {
++        let mut set = StampedVisitedSet::<u32>::new();
++        assert!(set.is_empty());
++
++        assert!(set.insert(5));
++        assert!(!set.insert(5));
++        assert!(set.contains(&5));
++        assert!(!set.contains(&4));
++        assert!(!set.is_empty());
++
++        // Ids beyond the current allocation grow the stamp array on demand.
++        assert!(set.insert(10_000));
++        assert!(set.contains(&10_000));
++        assert!(!set.contains(&9_999));
++
++        // Clearing is logical (epoch bump): previously visited ids read as unvisited.
++        set.clear();
++        assert!(set.is_empty());
++        assert!(!set.contains(&5));
++        assert!(!set.contains(&10_000));
++        assert!(set.insert(5));
++        assert!(set.contains(&5));
++
++        set.extend([7, 8, 8, 9]);
++        assert!(set.contains(&7));
++        assert!(set.contains(&9));
++        assert!(!set.insert(8));
++    }
++
++    #[test]
++    pub fn test_stamped_visited_set_epoch_wrap() {
++        let mut set = StampedVisitedSet::<u32>::with_capacity(4);
++        set.insert(1);
++        // Simulate a set that has exhausted its epoch counter.
++        set.epoch = u16::MAX;
++        set.clear();
++        assert!(!set.contains(&1));
++        assert!(set.insert(1));
++        assert!(set.contains(&1));
++    }
++
++    #[test]
++    pub fn test_stamped_visited_set_sentinel_ids() {
++        // Test providers use sentinel ids like u32::MAX for start points; these must
++        // work without growing the dense array to absurd sizes.
++        let mut set = StampedVisitedSet::<u32>::new();
++        assert!(set.insert(u32::MAX));
++        assert!(!set.insert(u32::MAX));
++        assert!(set.contains(&u32::MAX));
++        assert!(!set.contains(&(u32::MAX - 1)));
++        assert!(set.stamps.len() < 1024);
++
++        // Mixing dense and sentinel ids works.
++        assert!(set.insert(3));
++        assert!(set.contains(&3));
++        assert!(set.contains(&u32::MAX));
++
++        set.clear();
++        assert!(!set.contains(&u32::MAX));
++        assert!(set.overflow.is_empty());
++    }
+ }
+diff --git a/diskann/src/neighbor/queue.rs b/diskann/src/neighbor/queue.rs
+index f499157..20f4492 100644
+--- a/diskann/src/neighbor/queue.rs
++++ b/diskann/src/neighbor/queue.rs
+@@ -33,6 +33,14 @@ pub trait NeighborQueue<I: NeighborPriorityQueueIdType>: Debug + Send + Sync {
+     /// Insert a neighbor into the priority queue.
+     fn insert(&mut self, nbr: Neighbor<I>);
+ 
++    /// Whether the search may stop before the best-`search_l` window is fully visited.
++    ///
++    /// See [`NeighborPriorityQueue::should_stop_early`] for the semantics. The default
++    /// implementation never stops early.
++    fn should_stop_early(&self, _k: usize, _ratio: f32, _min_hops: u32, _hops: u32) -> bool {
++        false
++    }
++
+     /// Get the neighbor at the specified index.
+     fn get(&self, index: usize) -> Neighbor<I>;
+ 
+@@ -170,6 +178,25 @@ impl<I: NeighborPriorityQueueIdType> NeighborPriorityQueue<I> {
+         }
+     }
+ 
++    /// Determine whether a search may stop before the best-`search_param_l` window is
++    /// fully visited.
++    ///
++    /// Returns `true` once at least `min_hops` hops have been taken and the closest
++    /// unvisited candidate is farther from the query than `ratio` times the current
++    /// `k`-th best candidate distance. Beyond that point, expanding the frontier is
++    /// unlikely to change the top-`k` result set, so the remaining hops can be skipped.
++    /// `ratio` is expressed in the (possibly squared) distance space of the index;
++    /// `ratio == 1.0` is the most aggressive setting.
++    pub fn should_stop_early(&self, k: usize, ratio: f32, min_hops: u32, hops: u32) -> bool {
++        if hops < min_hops || self.size == 0 || !self.has_notvisited_node() {
++            return false;
++        }
++
++        let kth_distance = self.distances[k.min(self.size) - 1];
++        let frontier_distance = self.distances[self.cursor];
++        frontier_distance > kth_distance * ratio
++    }
++
+     /// Drain candidates from the front, signaling that they have been consumed.
+     pub fn drain_best(&mut self, count: usize) {
+         let count = count.min(self.size);
+@@ -485,6 +512,10 @@ impl<I: NeighborPriorityQueueIdType> NeighborQueue<I> for NeighborPriorityQueue<
+         self.insert(nbr)
+     }
+ 
++    fn should_stop_early(&self, k: usize, ratio: f32, min_hops: u32, hops: u32) -> bool {
++        self.should_stop_early(k, ratio, min_hops, hops)
++    }
++
+     fn get(&self, index: usize) -> Neighbor<I> {
+         self.get(index)
+     }
+@@ -1108,6 +1139,35 @@ mod neighbor_priority_queue_test {
+         test_queue_operations(resizable_queue);
+     }
+ 
++    #[test]
++    fn test_should_stop_early() {
++        let mut queue = NeighborPriorityQueue::new(10);
++        for i in 0..10 {
++            queue.insert(Neighbor::new(i, (i + 1) as f32));
++        }
++
++        // Not enough hops yet.
++        assert!(!queue.should_stop_early(3, 1.0, 2, 1));
++        // No candidates visited yet: frontier is the closest element, never stop.
++        assert!(!queue.should_stop_early(3, 1.0, 0, 5));
++
++        // Visit the 5 closest candidates: frontier distance is now 6.0, k=3 gives a
++        // k-th distance of 3.0.
++        for _ in 0..5 {
++            assert!(queue.closest_notvisited().is_some());
++        }
++        assert!(queue.should_stop_early(3, 1.0, 2, 2));
++        // A larger ratio keeps the search going.
++        assert!(!queue.should_stop_early(3, 3.0, 2, 2));
++        // A larger k keeps the search going (k-th distance is 6.0 at k=6).
++        assert!(!queue.should_stop_early(6, 1.0, 2, 2));
++        // Once the whole window is visited there is nothing left to expand.
++        for _ in 0..5 {
++            assert!(queue.closest_notvisited().is_some());
++        }
++        assert!(!queue.should_stop_early(3, 1.0, 2, 20));
++    }
++
+     #[test]
+     fn test_remove() {
+         let mut queue = NeighborPriorityQueue::new(10);
+diff --git a/diskann/src/utils/vector_id.rs b/diskann/src/utils/vector_id.rs
+index 3f14ea0..def3bf9 100644
+--- a/diskann/src/utils/vector_id.rs
++++ b/diskann/src/utils/vector_id.rs
+@@ -5,7 +5,7 @@
+ 
+ use diskann_vector::contains::ContainsSimd;
+ 
+-use crate::utils::TypeStr;
++use crate::utils::{IntoUsize, TypeStr};
+ 
+ /// The data type used to assign an identity to vectors. Canonically, this is either a
+ /// `u32` or a `u64`. Since this type is used to stored neighbor information in graphs,
+@@ -25,6 +25,7 @@ pub trait VectorId:
+     + std::fmt::Display
+     + Default
+     + ContainsSimd
++    + IntoUsize
+     + bytemuck::Pod
+     + 'static
+ {
+@@ -44,6 +45,7 @@ impl<T> VectorId for T where
+         + std::fmt::Display
+         + Default
+         + ContainsSimd
++        + IntoUsize
+         + bytemuck::Pod
+         + 'static
+ {
+diff --git a/generated_data/base_10k_128d.fbin b/generated_data/base_10k_128d.fbin
+new file mode 100644
+index 0000000..4e389be
+Binary files /dev/null and b/generated_data/base_10k_128d.fbin differ
+diff --git a/generated_data/gt_100_10k_k10.bin b/generated_data/gt_100_10k_k10.bin
+new file mode 100644
+index 0000000..bd5ada9
+Binary files /dev/null and b/generated_data/gt_100_10k_k10.bin differ
+diff --git a/generated_data/query_100_128d.fbin b/generated_data/query_100_128d.fbin
+new file mode 100644
+index 0000000..edbbaac
+Binary files /dev/null and b/generated_data/query_100_128d.fbin differ
+diff --git a/job.json b/job.json
+new file mode 100644
+index 0000000..94b2328
+--- /dev/null
++++ b/job.json
+@@ -0,0 +1,59 @@
++{
++  "search_directories": [
++    "generated_data"
++  ],
++  "jobs": [
++    {
++      "type": "graph-index-build",
++      "content": {
++        "source": {
++          "index-source": "Build",
++          "data_type": "float32",
++          "data": "sift1m/sift_base_1m_128d.fbin",
++          "distance": "squared_l2",
++          "max_degree": 32,
++          "l_build": 100,
++          "alpha": 1.2,
++          "backedge_ratio": 1.0,
++          "num_threads": 2,
++          "start_point_strategy": {
++            "latin_hyper_cube": [
++              7,
++              202232322
++            ]
++          }
++        },
++        "search_phase": {
++          "search-type": "topk",
++          "queries": "sift1m/sift_query_10k_128d.fbin",
++          "groundtruth": "sift1m/gt_sift_10k_k100.bin",
++          "reps": 3,
++          "num_threads": [
++            1,
++            2
++          ],
++          "recall_target": 0.95,
++          "runs": [
++            {
++              "search_n": 10,
++              "search_l": [
++                25,
++                35,
++                45,
++                60,
++                80,
++                100,
++                150,
++                200,
++                300
++              ],
++              "recall_k": 10,
++              "early_stop_ratio": 1.2,
++              "early_stop_min_hops": 8
++            }
++          ]
++        }
++      }
++    }
++  ]
++}
+\ No newline at end of file
+diff --git a/output.json b/output.json
+new file mode 100644
+index 0000000..ecdb2b6
+--- /dev/null
++++ b/output.json
+@@ -0,0 +1,780 @@
++[
++  {
++    "input": {
++      "content": {
++        "search_phase": {
++          "groundtruth": "generated_data/sift1m/gt_sift_10k_k100.bin",
++          "num_threads": [
++            1,
++            2
++          ],
++          "queries": "generated_data/sift1m/sift_query_10k_128d.fbin",
++          "recall_target": 0.95,
++          "reps": 3,
++          "runs": [
++            {
++              "beam_width": null,
++              "early_stop_min_hops": 8,
++              "early_stop_ratio": 1.2000000476837158,
++              "recall_k": 10,
++              "search_l": [
++                25,
++                35,
++                45,
++                60,
++                80,
++                100,
++                150,
++                200,
++                300
++              ],
++              "search_n": 10
++            }
++          ],
++          "search-type": "topk"
++        },
++        "source": {
++          "alpha": 1.2000000476837158,
++          "backedge_ratio": 1.0,
++          "data": "generated_data/sift1m/sift_base_1m_128d.fbin",
++          "data_type": "float32",
++          "distance": "squared_l2",
++          "index-source": "Build",
++          "insert_retry": null,
++          "l_build": 100,
++          "max_degree": 32,
++          "multi_insert": null,
++          "num_threads": 2,
++          "prefetch_lookahead": null,
++          "save_path": null,
++          "start_point_strategy": {
++            "latin_hyper_cube": {
++              "nsamples": 7,
++              "seed": 202232322
++            }
++          }
++        }
++      },
++      "type": "graph-index-build"
++    },
++    "results": {
++      "build": {
++        "insert_latencies": {
++          "mean": 491.200882,
++          "median": 483.0,
++          "minimum": 65,
++          "p90": 612,
++          "p99": 804
++        },
++        "kind": "SingleInsert",
++        "total_time": 246238623,
++        "vectors_inserted": 1000000
++      },
++      "search": {
++        "Topk": [
++          {
++            "mean_cmps": 975.5864868164062,
++            "mean_hops": 36.376399993896484,
++            "mean_latencies": [
++              190.9833,
++              191.0463,
++              188.3153
++            ],
++            "num_tasks": 1,
++            "p90_latencies": [
++              226,
++              224,
++              216
++            ],
++            "p99_latencies": [
++              267,
++              264,
++              246
++            ],
++            "qps": [
++              5219.9967636020065,
++              5218.258896609593,
++              5293.9912140921815
++            ],
++            "recall": {
++              "average": 0.94724,
++              "num_queries": 10000,
++              "recall_k": 10,
++              "recall_n": 10
++            },
++            "search_l": 25,
++            "search_latencies": [
++              1915710,
++              1916348,
++              1888934
++            ],
++            "search_n": 10
++          },
++          {
++            "mean_cmps": 1163.09765625,
++            "mean_hops": 44.5281982421875,
++            "mean_latencies": [
++              214.2388,
++              214.5657,
++              215.8511
++            ],
++            "num_tasks": 1,
++            "p90_latencies": [
++              249,
++              249,
++              252
++            ],
++            "p99_latencies": [
++              291,
++              287,
++              287
++            ],
++            "qps": [
++              4655.023212273249,
++              4648.028074089567,
++              4620.3803127443025
++            ],
++            "recall": {
++              "average": 0.9655,
++              "num_queries": 10000,
++              "recall_k": 10,
++              "recall_n": 10
++            },
++            "search_l": 35,
++            "search_latencies": [
++              2148217,
++              2151450,
++              2164324
++            ],
++            "search_n": 10
++          },
++          {
++            "mean_cmps": 1327.4373779296875,
++            "mean_hops": 51.76850128173828,
++            "mean_latencies": [
++              241.438,
++              242.5054,
++              243.1687
++            ],
++            "num_tasks": 1,
++            "p90_latencies": [
++              287,
++              290,
++              289
++            ],
++            "p99_latencies": [
++              340,
++              322,
++              320
++            ],
++            "qps": [
++              4131.652632131284,
++              4113.657053461498,
++              4102.397482112521
++            ],
++            "recall": {
++              "average": 0.9748,
++              "num_queries": 10000,
++              "recall_k": 10,
++              "recall_n": 10
++            },
++            "search_l": 45,
++            "search_latencies": [
++              2420339,
++              2430927,
++              2437599
++            ],
++            "search_n": 10
++          },
++          {
++            "mean_cmps": 1527.6434326171875,
++            "mean_hops": 60.69369888305664,
++            "mean_latencies": [
++              271.373,
++              268.2581,
++              268.0449
++            ],
++            "num_tasks": 1,
++            "p90_latencies": [
++              337,
++              332,
++              331
++            ],
++            "p99_latencies": [
++              405,
++              384,
++              384
++            ],
++            "qps": [
++              3676.9545403402362,
++              3719.649980936794,
++              3722.6242863263915
++            ],
++            "recall": {
++              "average": 0.98336,
++              "num_queries": 10000,
++              "recall_k": 10,
++              "recall_n": 10
++            },
++            "search_l": 60,
++            "search_latencies": [
++              2719642,
++              2688425,
++              2686277
++            ],
++            "search_n": 10
++          },
++          {
++            "mean_cmps": 1719.595703125,
++            "mean_hops": 69.34549713134766,
++            "mean_latencies": [
++              294.2695,
++              294.0198,
++              293.165
++            ],
++            "num_tasks": 1,
++            "p90_latencies": [
++              389,
++              388,
++              389
++            ],
++            "p99_latencies": [
++              434,
++              429,
++              428
++            ],
++            "qps": [
++              3391.505567325964,
++              3394.421607530185,
++              3404.2135994248238
++            ],
++            "recall": {
++              "average": 0.98919,
++              "num_queries": 10000,
++              "recall_k": 10,
++              "recall_n": 10
++            },
++            "search_l": 80,
++            "search_latencies": [
++              2948543,
++              2946010,
++              2937536
++            ],
++            "search_n": 10
++          },
++          {
++            "mean_cmps": 1844.005859375,
++            "mean_hops": 74.99579620361328,
++            "mean_latencies": [
++              319.229,
++              318.4194,
++              315.35
++            ],
++            "num_tasks": 1,
++            "p90_latencies": [
++              454,
++              455,
++              449
++            ],
++            "p99_latencies": [
++              523,
++              501,
++              493
++            ],
++            "qps": [
++              3126.7979087975586,
++              3134.7441562883128,
++              3165.117868989441
++            ],
++            "recall": {
++              "average": 0.99159,
++              "num_queries": 10000,
++              "recall_k": 10,
++              "recall_n": 10
++            },
++            "search_l": 100,
++            "search_latencies": [
++              3198160,
++              3190053,
++              3159440
++            ],
++            "search_n": 10
++          },
++          {
++            "mean_cmps": 1990.3651123046875,
++            "mean_hops": 81.706298828125,
++            "mean_latencies": [
++              343.9236,
++              345.9307,
++              338.0854
++            ],
++            "num_tasks": 1,
++            "p90_latencies": [
++              553,
++              556,
++              541
++            ],
++            "p99_latencies": [
++              657,
++              661,
++              639
++            ],
++            "qps": [
++              2902.6194398873317,
++              2885.887950205735,
++              2952.7896184641477
++            ],
++            "recall": {
++              "average": 0.99388,
++              "num_queries": 10000,
++              "recall_k": 10,
++              "recall_n": 10
++            },
++            "search_l": 150,
++            "search_latencies": [
++              3445164,
++              3465138,
++              3386628
++            ],
++            "search_n": 10
++          },
++          {
++            "mean_cmps": 2034.9366455078125,
++            "mean_hops": 83.79769897460938,
++            "mean_latencies": [
++              352.7934,
++              351.7582,
++              354.2823
++            ],
++            "num_tasks": 1,
++            "p90_latencies": [
++              560,
++              558,
++              563
++            ],
++            "p99_latencies": [
++              779,
++              775,
++              780
++            ],
++            "qps": [
++              2829.886201786168,
++              2838.1717065500748,
++              2817.9992374494063
++            ],
++            "recall": {
++              "average": 0.99439,
++              "num_queries": 10000,
++              "recall_k": 10,
++              "recall_n": 10
++            },
++            "search_l": 200,
++            "search_latencies": [
++              3533711,
++              3523395,
++              3548617
++            ],
++            "search_n": 10
++          },
++          {
++            "mean_cmps": 2053.197998046875,
++            "mean_hops": 84.67630004882812,
++            "mean_latencies": [
++              465.1809,
++              452.4637,
++              461.061
++            ],
++            "num_tasks": 1,
++            "p90_latencies": [
++              694,
++              673,
++              687
++            ],
++            "p99_latencies": [
++              1031,
++              1010,
++              1017
++            ],
++            "qps": [
++              2146.879628538299,
++              2207.2443525445997,
++              2166.1305132624593
++            ],
++            "recall": {
++              "average": 0.9945,
++              "num_queries": 10000,
++              "recall_k": 10,
++              "recall_n": 10
++            },
++            "search_l": 300,
++            "search_latencies": [
++              4657923,
++              4530536,
++              4616527
++            ],
++            "search_n": 10
++          },
++          {
++            "mean_cmps": 975.5864868164062,
++            "mean_hops": 36.376399993896484,
++            "mean_latencies": [
++              201.823,
++              203.5565,
++              200.8539
++            ],
++            "num_tasks": 2,
++            "p90_latencies": [
++              225,
++              234,
++              228
++            ],
++            "p99_latencies": [
++              290,
++              305,
++              297
++            ],
++            "qps": [
++              9859.268797188926,
++              9485.443164647375,
++              9726.424848292088
++            ],
++            "recall": {
++              "average": 0.94724,
++              "num_queries": 10000,
++              "recall_k": 10,
++              "recall_n": 10
++            },
++            "search_l": 25,
++            "search_latencies": [
++              1014274,
++              1054247,
++              1028127
++            ],
++            "search_n": 10
++          },
++          {
++            "mean_cmps": 1163.09765625,
++            "mean_hops": 44.5281982421875,
++            "mean_latencies": [
++              232.6199,
++              226.7266,
++              229.1171
++            ],
++            "num_tasks": 2,
++            "p90_latencies": [
++              272,
++              256,
++              261
++            ],
++            "p99_latencies": [
++              347,
++              325,
++              343
++            ],
++            "qps": [
++              8346.590501246146,
++              8485.773176980134,
++              8627.569398011345
++            ],
++            "recall": {
++              "average": 0.9655,
++              "num_queries": 10000,
++              "recall_k": 10,
++              "recall_n": 10
++            },
++            "search_l": 35,
++            "search_latencies": [
++              1198094,
++              1178443,
++              1159075
++            ],
++            "search_n": 10
++          },
++          {
++            "mean_cmps": 1327.4373779296875,
++            "mean_hops": 51.76850128173828,
++            "mean_latencies": [
++              260.7731,
++              249.2454,
++              253.331
++            ],
++            "num_tasks": 2,
++            "p90_latencies": [
++              306,
++              290,
++              295
++            ],
++            "p99_latencies": [
++              430,
++              354,
++              393
++            ],
++            "qps": [
++              7268.841746411918,
++              7840.560631447391,
++              7790.965285016882
++            ],
++            "recall": {
++              "average": 0.9748,
++              "num_queries": 10000,
++              "recall_k": 10,
++              "recall_n": 10
++            },
++            "search_l": 45,
++            "search_latencies": [
++              1375735,
++              1275419,
++              1283538
++            ],
++            "search_n": 10
++          },
++          {
++            "mean_cmps": 1527.6434326171875,
++            "mean_hops": 60.69369888305664,
++            "mean_latencies": [
++              282.5355,
++              284.2304,
++              282.6841
++            ],
++            "num_tasks": 2,
++            "p90_latencies": [
++              345,
++              354,
++              343
++            ],
++            "p99_latencies": [
++              428,
++              447,
++              424
++            ],
++            "qps": [
++              6939.490419339527,
++              6824.145190513073,
++              6947.08819745292
++            ],
++            "recall": {
++              "average": 0.98336,
++              "num_queries": 10000,
++              "recall_k": 10,
++              "recall_n": 10
++            },
++            "search_l": 60,
++            "search_latencies": [
++              1441028,
++              1465385,
++              1439452
++            ],
++            "search_n": 10
++          },
++          {
++            "mean_cmps": 1719.595703125,
++            "mean_hops": 69.34549713134766,
++            "mean_latencies": [
++              315.2898,
++              318.5794,
++              321.6527
++            ],
++            "num_tasks": 2,
++            "p90_latencies": [
++              407,
++              409,
++              413
++            ],
++            "p99_latencies": [
++              494,
++              507,
++              512
++            ],
++            "qps": [
++              5947.877559371714,
++              6216.694061565165,
++              6177.018526113964
++            ],
++            "recall": {
++              "average": 0.98919,
++              "num_queries": 10000,
++              "recall_k": 10,
++              "recall_n": 10
++            },
++            "search_l": 80,
++            "search_latencies": [
++              1681272,
++              1608572,
++              1618904
++            ],
++            "search_n": 10
++          },
++          {
++            "mean_cmps": 1844.005859375,
++            "mean_hops": 74.99579620361328,
++            "mean_latencies": [
++              332.2359,
++              335.9746,
++              350.4402
++            ],
++            "num_tasks": 2,
++            "p90_latencies": [
++              464,
++              466,
++              472
++            ],
++            "p99_latencies": [
++              567,
++              559,
++              772
++            ],
++            "qps": [
++              5784.830900715526,
++              5887.454247121183,
++              5671.104305785944
++            ],
++            "recall": {
++              "average": 0.99159,
++              "num_queries": 10000,
++              "recall_k": 10,
++              "recall_n": 10
++            },
++            "search_l": 100,
++            "search_latencies": [
++              1728659,
++              1698527,
++              1763325
++            ],
++            "search_n": 10
++          },
++          {
++            "mean_cmps": 1990.3651123046875,
++            "mean_hops": 81.706298828125,
++            "mean_latencies": [
++              372.3644,
++              369.2032,
++              365.9017
++            ],
++            "num_tasks": 2,
++            "p90_latencies": [
++              582,
++              579,
++              574
++            ],
++            "p99_latencies": [
++              745,
++              724,
++              713
++            ],
++            "qps": [
++              5355.3086639254625,
++              5292.693912396389,
++              5389.937740829156
++            ],
++            "recall": {
++              "average": 0.99388,
++              "num_queries": 10000,
++              "recall_k": 10,
++              "recall_n": 10
++            },
++            "search_l": 150,
++            "search_latencies": [
++              1867306,
++              1889397,
++              1855309
++            ],
++            "search_n": 10
++          },
++          {
++            "mean_cmps": 2034.9366455078125,
++            "mean_hops": 83.79769897460938,
++            "mean_latencies": [
++              386.8744,
++              417.6693,
++              475.4241
++            ],
++            "num_tasks": 2,
++            "p90_latencies": [
++              604,
++              662,
++              739
++            ],
++            "p99_latencies": [
++              866,
++              1016,
++              1099
++            ],
++            "qps": [
++              4882.004394780356,
++              4745.257945104009,
++              4155.351989478649
++            ],
++            "recall": {
++              "average": 0.99439,
++              "num_queries": 10000,
++              "recall_k": 10,
++              "recall_n": 10
++            },
++            "search_l": 200,
++            "search_latencies": [
++              2048339,
++              2107367,
++              2406535
++            ],
++            "search_n": 10
++          },
++          {
++            "mean_cmps": 2053.197998046875,
++            "mean_hops": 84.67630004882812,
++            "mean_latencies": [
++              483.9811,
++              493.5771,
++              460.0034
++            ],
++            "num_tasks": 2,
++            "p90_latencies": [
++              737,
++              749,
++              700
++            ],
++            "p99_latencies": [
++              1278,
++              1212,
++              1126
++            ],
++            "qps": [
++              4034.219866596417,
++              3994.2466870719413,
++              4158.739070313881
++            ],
++            "recall": {
++              "average": 0.9945,
++              "num_queries": 10000,
++              "recall_k": 10,
++              "recall_n": 10
++            },
++            "search_l": 300,
++            "search_latencies": [
++              2478794,
++              2503601,
++              2404575
++            ],
++            "search_n": 10
++          }
++        ]
++      },
++      "search_summary": {
++        "per_thread": [
++          {
++            "achieved_recall": 0.9655,
++            "num_tasks": 1,
++            "qps_at_recall": 4641.14386636904,
++            "search_l": 35
++          },
++          {
++            "achieved_recall": 0.9655,
++            "num_tasks": 2,
++            "qps_at_recall": 8486.644358745876,
++            "search_l": 35
++          }
++        ],
++        "recall_target": 0.95
++      }
++    }
++  }
++]
+\ No newline at end of file
+diff --git a/tools/prepare_sift1m.py b/tools/prepare_sift1m.py
+new file mode 100644
+index 0000000..413f413
+--- /dev/null
++++ b/tools/prepare_sift1m.py
+@@ -0,0 +1,81 @@
++#!/usr/bin/env python3
++"""One-time SIFT1M data preparation for the DiskANN benchmark harness.
++
++Downloads sift-128-euclidean.hdf5 (the standard ANN-benchmarks SIFT1M distribution:
++1M x 128d float32 base vectors, 10K queries, exact top-100 ground truth) and writes
++the DiskANN formats used by job.json:
++
++  generated_data/sift1m/sift_base_1m_128d.fbin   - base vectors (.fbin)
++  generated_data/sift1m/sift_query_10k_128d.fbin - query vectors (.fbin)
++  generated_data/sift1m/gt_sift_10k_k100.bin     - ground truth (header + u32 ids + f32 dists)
++
++Usage (requires numpy + h5py):
++  python3 tools/prepare_sift1m.py
++
++For datasets distributed as raw .fvecs/.ivecs (e.g. GIST1M), use the Rust converter
++instead: cargo run --release -p diskann-tools --bin convert_vecs -- --help
++"""
++
++import struct
++import sys
++import urllib.request
++from pathlib import Path
++
++import h5py
++import numpy as np
++
++URL = "http://vectors.erikbern.com/sift-128-euclidean.hdf5"
++OUT_DIR = Path(__file__).resolve().parent.parent / "generated_data" / "sift1m"
++
++
++def write_fbin(path: Path, mat: np.ndarray) -> None:
++    mat = np.ascontiguousarray(mat, dtype=np.float32)
++    with open(path, "wb") as f:
++        f.write(struct.pack("<II", mat.shape[0], mat.shape[1]))
++        mat.tofile(f)
++    print(f"wrote {path} ({mat.shape[0]} x {mat.shape[1]} f32)")
++
++
++def write_groundtruth(path: Path, ids: np.ndarray, dists: np.ndarray) -> None:
++    ids = np.ascontiguousarray(ids, dtype=np.uint32)
++    dists = np.ascontiguousarray(dists, dtype=np.float32)
++    assert ids.shape == dists.shape
++    with open(path, "wb") as f:
++        f.write(struct.pack("<II", ids.shape[0], ids.shape[1]))
++        ids.tofile(f)
++        dists.tofile(f)
++    print(f"wrote {path} ({ids.shape[0]} x {ids.shape[1]} ids+dists)")
++
++
++def main() -> int:
++    OUT_DIR.mkdir(parents=True, exist_ok=True)
++    hdf5_path = OUT_DIR / "sift-128-euclidean.hdf5"
++
++    if not hdf5_path.exists():
++        print(f"downloading {URL} -> {hdf5_path}")
++        urllib.request.urlretrieve(URL, hdf5_path)
++
++    with h5py.File(hdf5_path, "r") as h5:
++        # ann-benchmarks hdf5 layout: train/test (+ base/queries in some variants)
++        base_key = "train" if "train" in h5 else "base"
++        query_key = "test" if "test" in h5 else "queries"
++        base = h5[base_key][:]  # (1_000_000, 128) float32
++        queries = h5[query_key][:]  # (10_000, 128) float32
++        neighbors = h5["neighbors"][:]  # (10_000, 100) int32/uint32
++        # Distances in the hdf5 are NOT squared-L2-consistent with the benchmark's
++        # Metric::L2 convention in all distributions; recompute exact squared L2.
++        print("recomputing exact squared-L2 ground-truth distances...")
++        base_t = base.astype(np.float32)
++        dists = np.empty(neighbors.shape, dtype=np.float32)
++        for q in range(queries.shape[0]):
++            diff = base_t[neighbors[q]] - queries[q]
++            dists[q] = np.einsum("ij,ij->i", diff, diff, dtype=np.float32)
++
++    write_fbin(OUT_DIR / "sift_base_1m_128d.fbin", base)
++    write_fbin(OUT_DIR / "sift_query_10k_128d.fbin", queries)
++    write_groundtruth(OUT_DIR / "gt_sift_10k_k100.bin", neighbors, dists)
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
